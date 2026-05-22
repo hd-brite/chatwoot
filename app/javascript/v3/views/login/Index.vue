@@ -299,7 +299,6 @@ export default {
           <div v-if="showOidcLogin" class="text-center">
             <a
               href="/omniauth/openid_connect"
-              data-method="post"
               class="inline-flex justify-center w-full px-4 py-3 items-center bg-n-background dark:bg-n-solid-3 rounded-md shadow-sm ring-1 ring-inset ring-n-container dark:ring-n-container focus:outline-offset-0 hover:bg-n-alpha-2 dark:hover:bg-n-alpha-2"
             >
               <Icon
