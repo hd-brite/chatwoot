@@ -492,6 +492,36 @@
   type: boolean
 ## ------ End of Configs added for SAML SSO ------ ##
 
+## ------ Configs added for OIDC SSO ------ ##
+- name: OIDC_ISSUER_URL
+  display_title: 'OIDC Issuer URL'
+  value:
+  locked: false
+  description: 'OpenID Connect issuer URL (e.g. https://auth.example.com). When set, OIDC SSO login is enabled.'
+- name: OIDC_CLIENT_ID
+  display_title: 'OIDC Client ID'
+  value:
+  locked: false
+  description: 'Client ID from your OIDC identity provider.'
+- name: OIDC_CLIENT_SECRET
+  display_title: 'OIDC Client Secret'
+  value:
+  locked: false
+  description: 'Client secret from your OIDC identity provider.'
+  type: secret
+- name: OIDC_DISPLAY_NAME
+  display_title: 'OIDC Login Button Label'
+  value: 'SSO Login'
+  locked: false
+  description: 'Display name shown on the OIDC SSO login button.'
+- name: ENABLE_OIDC_SSO_LOGIN
+  display_title: 'Enable OIDC SSO login'
+  value: true
+  locked: false
+  description: 'Show OIDC SSO as a login option when OIDC_ISSUER_URL is configured.'
+  type: boolean
+## ------ End of Configs added for OIDC SSO ------ ##
+
 ## ------ Configs added for Cloudflare ------ ##
 - name: CLOUDFLARE_API_KEY
   display_title: 'Cloudflare API Key'
