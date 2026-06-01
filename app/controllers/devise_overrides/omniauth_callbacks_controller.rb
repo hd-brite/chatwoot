@@ -14,6 +14,17 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     end
   end
 
+  # /omniauth/:provider/callback. devise_token_auth's redirect_callbacks stashes
+  # the auth hash into the session WITHOUT the `extra` section (it strips it to
+  # avoid CookieOverflow) and 307-redirects to /auth/:provider/callback. Since
+  # the OIDC role/group claims live in `extra.raw_info`, they never reach
+  # omniauth_success. Capture them here, while `extra` is still present, so the
+  # super-admin mapping has something to work with.
+  def redirect_callbacks
+    stash_oidc_role_keys
+    super
+  end
+
   private
 
   def sign_in_user
@@ -146,15 +157,39 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   end
 
   def oidc_user_is_admin?
-    roles = oidc_project_roles
-    roles.any? { |key, _| key.start_with?('argocd-') }
+    oidc_user_role_keys.any? { |key| key.start_with?('argocd-') }
   end
 
-  def oidc_project_roles
-    extra = auth_hash.dig('extra', 'raw_info') || {}
-    extra.fetch('urn:zitadel:iam:org:project:roles', {})
-  rescue StandardError
-    {}
+  # Roles are stashed by redirect_callbacks (before `extra` is stripped) and
+  # read back here in omniauth_success after the redirect bounce.
+  def oidc_user_role_keys
+    keys = Array(session['oidc.role_keys']).map(&:to_s)
+    Rails.logger.info("[oidc] resolved role keys: #{keys.inspect}") if ENV['OIDC_LOG_ROLES'] == 'true'
+    keys
+  end
+
+  def stash_oidc_role_keys
+    auth = request.env['omniauth.auth']
+    return unless auth.present? && auth['provider'] == 'openid_connect'
+
+    session['oidc.role_keys'] = extract_oidc_role_keys(auth['extra'])
+  rescue StandardError => e
+    Rails.logger.error("[oidc] failed to stash role keys: #{e.class}: #{e.message}")
+  end
+
+  # Brite's Zitadel emits a user's granted roles as a flat `groups` claim (see
+  # the AddGroupsClaim action in the zitadel terraform) - the same claim ArgoCD
+  # consumes. Standard Zitadel setups instead expose them under the project
+  # roles claim (a hash). Read both so super-admin mapping is robust regardless
+  # of how the issued token is shaped.
+  def extract_oidc_role_keys(extra)
+    raw = (extra && extra['raw_info']) || {}
+
+    keys = Array(raw['groups']).map(&:to_s)
+    project_roles = raw['urn:zitadel:iam:org:project:roles']
+    keys.concat(project_roles.keys.map(&:to_s)) if project_roles.is_a?(Hash)
+
+    keys.uniq
   end
 
   def default_devise_mapping
