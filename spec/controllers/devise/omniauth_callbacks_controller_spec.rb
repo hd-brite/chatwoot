@@ -181,4 +181,96 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
       end
     end
   end
+
+  describe '#omniauth_success with OpenID Connect (Zitadel)' do
+    # Brite's Zitadel emits a user's granted roles via a flat `groups` claim in
+    # `extra.raw_info`. devise_token_auth strips `extra` during the callback
+    # bounce, so the controller stashes role keys in redirect_callbacks; these
+    # tests exercise that end-to-end through the bounce.
+    def set_oidc_omniauth(email:, groups: [], name: 'OIDC User')
+      OmniAuth.config.test_mode = true
+      OmniAuth.config.mock_auth[:openid_connect] = OmniAuth::AuthHash.new(
+        provider: 'openid_connect',
+        uid: "oidc-#{email}",
+        info: { name: name, email: email, email_verified: true },
+        credentials: { token: 'access-token' },
+        extra: { raw_info: { 'groups' => groups } }
+      )
+    end
+
+    before do
+      GlobalConfig.clear_cache
+      allow(email_validation_service).to receive(:perform).and_return(true)
+    end
+
+    after do
+      OmniAuth.config.mock_auth[:openid_connect] = nil
+    end
+
+    it 'promotes an existing user to super admin when they hold an argocd role' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        user = create(:user, email: 'oidc-admin@example.com')
+        set_oidc_omniauth(email: 'oidc-admin@example.com', groups: %w[argocd-admins])
+
+        get '/omniauth/openid_connect/callback'
+        follow_redirect!
+
+        expect(user.reload.type).to eq('SuperAdmin')
+      end
+    end
+
+    it 'keeps a non-argocd existing user as a normal user' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        user = create(:user, email: 'oidc-user@example.com')
+        set_oidc_omniauth(email: 'oidc-user@example.com', groups: %w[lms-admin])
+
+        get '/omniauth/openid_connect/callback'
+        follow_redirect!
+
+        expect(user.reload.type).not_to eq('SuperAdmin')
+      end
+    end
+
+    it 'demotes a super admin who no longer holds an argocd role' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        create(:user, email: 'oidc-exadmin@example.com', type: 'SuperAdmin')
+        set_oidc_omniauth(email: 'oidc-exadmin@example.com', groups: [])
+
+        get '/omniauth/openid_connect/callback'
+        follow_redirect!
+
+        expect(User.find_by(email: 'oidc-exadmin@example.com').type).to eq('User')
+      end
+    end
+
+    it 'auto-provisions a new argocd user as a super admin administrator' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com', OIDC_AUTO_PROVISION: 'true' do
+        account = create(:account)
+        set_oidc_omniauth(email: 'new-admin@example.com', groups: %w[argocd-users])
+
+        get '/omniauth/openid_connect/callback'
+        follow_redirect!
+
+        user = User.find_by(email: 'new-admin@example.com')
+        expect(user).to be_present
+        expect(user.type).to eq('SuperAdmin')
+        expect(account.account_users.find_by(user_id: user.id).role).to eq('administrator')
+      end
+    end
+
+    it 'auto-provisions a new non-argocd user as a normal agent' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com', OIDC_AUTO_PROVISION: 'true' do
+        account = create(:account)
+        set_oidc_omniauth(email: 'new-agent@example.com', groups: [])
+
+        get '/omniauth/openid_connect/callback'
+        follow_redirect!
+
+        user = User.find_by(email: 'new-agent@example.com')
+        expect(user).to be_present
+        expect(user.type).not_to eq('SuperAdmin')
+        expect(account.account_users.find_by(user_id: user.id).role).to eq('agent')
+      end
+    end
+  end
 end
