@@ -4,7 +4,14 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   def omniauth_success
     get_resource_from_auth_hash
 
-    @resource.present? ? sign_in_user : sign_up_user
+    if @resource.present?
+      sync_super_admin_from_oidc if oidc_provider?
+      sign_in_user
+    elsif oidc_provider? && oidc_auto_provision_enabled?
+      auto_provision_oidc_user
+    else
+      sign_up_user
+    end
   end
 
   private
@@ -97,6 +104,57 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   def set_random_password_if_oauth_user
     # Password must satisfy secure_password requirements (uppercase, lowercase, number, special char)
     @resource.update(password: "#{SecureRandom.hex(16)}aA1!") if @resource.persisted?
+  end
+
+  def oidc_provider?
+    auth_hash['provider'] == 'openid_connect'
+  end
+
+  def oidc_auto_provision_enabled?
+    ENV['OIDC_AUTO_PROVISION'] == 'true'
+  end
+
+  def auto_provision_oidc_user
+    account = Account.first
+    return redirect_to login_page_url(error: 'no-account-found') if account.nil?
+
+    @resource = User.new(
+      email: auth_hash['info']['email'],
+      name: auth_hash['info']['name'] || auth_hash['info']['email'].split('@').first,
+      password: "#{SecureRandom.hex(16)}aA1!"
+    )
+    @resource.confirm
+    @resource.type = 'SuperAdmin' if oidc_user_is_admin?
+    @resource.save!
+
+    AccountUser.create!(
+      account_id: account.id,
+      user_id: @resource.id,
+      role: oidc_user_is_admin? ? :administrator : :agent
+    )
+
+    encoded_email = ERB::Util.url_encode(@resource.email)
+    redirect_to login_page_url(email: encoded_email, sso_auth_token: @resource.generate_sso_auth_token)
+  end
+
+  def sync_super_admin_from_oidc
+    should_be_admin = oidc_user_is_admin?
+    is_admin = @resource.type == 'SuperAdmin'
+    return if should_be_admin == is_admin
+
+    @resource.update!(type: should_be_admin ? 'SuperAdmin' : 'User')
+  end
+
+  def oidc_user_is_admin?
+    roles = oidc_project_roles
+    roles.any? { |key, _| key.start_with?('argocd-') }
+  end
+
+  def oidc_project_roles
+    extra = auth_hash.dig('extra', 'raw_info') || {}
+    extra.fetch('urn:zitadel:iam:org:project:roles', {})
+  rescue StandardError
+    {}
   end
 
   def default_devise_mapping

@@ -3,7 +3,7 @@ name: Build and push Chatwoot Brite image to ACR
 on:
   push:
     branches:
-      - feature/bo-1696-zitadel-oidc-sso
+      - master
     tags:
       - "v*-brite.*"
   workflow_dispatch:
