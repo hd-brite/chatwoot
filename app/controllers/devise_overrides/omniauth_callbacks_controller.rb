@@ -129,23 +129,24 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     account = Account.first
     return redirect_to login_page_url(error: 'no-account-found') if account.nil?
 
-    @resource = User.new(
+    is_admin = oidc_user_is_admin?
+    @resource = build_oidc_user(is_admin)
+    AccountUser.create!(account_id: account.id, user_id: @resource.id, role: is_admin ? :administrator : :agent)
+
+    encoded_email = ERB::Util.url_encode(@resource.email)
+    redirect_to login_page_url(email: encoded_email, sso_auth_token: @resource.generate_sso_auth_token)
+  end
+
+  def build_oidc_user(is_admin)
+    user = User.new(
       email: auth_hash['info']['email'],
       name: auth_hash['info']['name'] || auth_hash['info']['email'].split('@').first,
       password: "#{SecureRandom.hex(16)}aA1!"
     )
-    @resource.confirm
-    @resource.type = 'SuperAdmin' if oidc_user_is_admin?
-    @resource.save!
-
-    AccountUser.create!(
-      account_id: account.id,
-      user_id: @resource.id,
-      role: oidc_user_is_admin? ? :administrator : :agent
-    )
-
-    encoded_email = ERB::Util.url_encode(@resource.email)
-    redirect_to login_page_url(email: encoded_email, sso_auth_token: @resource.generate_sso_auth_token)
+    user.confirm
+    user.type = 'SuperAdmin' if is_admin
+    user.save!
+    user
   end
 
   def sync_super_admin_from_oidc
