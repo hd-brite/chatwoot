@@ -187,9 +187,17 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
     # `extra.raw_info`. devise_token_auth strips `extra` during the callback
     # bounce, so the controller stashes role keys in redirect_callbacks; these
     # tests exercise that end-to-end through the bounce.
+    #
+    # The `openid_connect` provider is only registered when OIDC_ISSUER_URL is
+    # set (see config/initializers/omniauth.rb), so it is absent from the
+    # OmniAuth middleware in the test env. We therefore drive the flow through
+    # the always-registered google_oauth2 transport while crafting the auth
+    # hash with provider 'openid_connect' and the `groups` claim - the
+    # controller branches on auth_hash['provider'], so the exercised code path
+    # is identical to a real OIDC callback.
     def set_oidc_omniauth(email:, groups: [], name: 'OIDC User')
       OmniAuth.config.test_mode = true
-      OmniAuth.config.mock_auth[:openid_connect] = OmniAuth::AuthHash.new(
+      OmniAuth.config.mock_auth[:google_oauth2] = OmniAuth::AuthHash.new(
         provider: 'openid_connect',
         uid: "oidc-#{email}",
         info: { name: name, email: email, email_verified: true },
@@ -204,7 +212,7 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
     end
 
     after do
-      OmniAuth.config.mock_auth[:openid_connect] = nil
+      OmniAuth.config.mock_auth[:google_oauth2] = nil
     end
 
     it 'promotes an existing user to super admin when they hold an argocd role' do
@@ -212,7 +220,7 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         user = create(:user, email: 'oidc-admin@example.com')
         set_oidc_omniauth(email: 'oidc-admin@example.com', groups: %w[argocd-admins])
 
-        get '/omniauth/openid_connect/callback'
+        get '/omniauth/google_oauth2/callback'
         follow_redirect!
 
         expect(user.reload.type).to eq('SuperAdmin')
@@ -224,7 +232,7 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         user = create(:user, email: 'oidc-user@example.com')
         set_oidc_omniauth(email: 'oidc-user@example.com', groups: %w[lms-admin])
 
-        get '/omniauth/openid_connect/callback'
+        get '/omniauth/google_oauth2/callback'
         follow_redirect!
 
         expect(user.reload.type).not_to eq('SuperAdmin')
@@ -236,10 +244,10 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         create(:user, email: 'oidc-exadmin@example.com', type: 'SuperAdmin')
         set_oidc_omniauth(email: 'oidc-exadmin@example.com', groups: [])
 
-        get '/omniauth/openid_connect/callback'
+        get '/omniauth/google_oauth2/callback'
         follow_redirect!
 
-        expect(User.find_by(email: 'oidc-exadmin@example.com').type).to eq('User')
+        expect(User.from_email('oidc-exadmin@example.com').type).to eq('User')
       end
     end
 
@@ -248,10 +256,10 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         account = create(:account)
         set_oidc_omniauth(email: 'new-admin@example.com', groups: %w[argocd-users])
 
-        get '/omniauth/openid_connect/callback'
+        get '/omniauth/google_oauth2/callback'
         follow_redirect!
 
-        user = User.find_by(email: 'new-admin@example.com')
+        user = User.from_email('new-admin@example.com')
         expect(user).to be_present
         expect(user.type).to eq('SuperAdmin')
         expect(account.account_users.find_by(user_id: user.id).role).to eq('administrator')
@@ -263,10 +271,10 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         account = create(:account)
         set_oidc_omniauth(email: 'new-agent@example.com', groups: [])
 
-        get '/omniauth/openid_connect/callback'
+        get '/omniauth/google_oauth2/callback'
         follow_redirect!
 
-        user = User.find_by(email: 'new-agent@example.com')
+        user = User.from_email('new-agent@example.com')
         expect(user).to be_present
         expect(user.type).not_to eq('SuperAdmin')
         expect(account.account_users.find_by(user_id: user.id).role).to eq('agent')
