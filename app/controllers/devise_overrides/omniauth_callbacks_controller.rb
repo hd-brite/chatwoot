@@ -118,7 +118,10 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   end
 
   def oidc_provider?
-    auth_hash['provider'] == 'openid_connect'
+    # OmniAuth registers the strategy with `name: :openid_connect`, so the auth
+    # hash carries the provider as the Symbol `:openid_connect`. Hashie::Mash
+    # stringifies keys but leaves symbol values intact, so compare via `to_s`.
+    auth_hash['provider'].to_s == 'openid_connect'
   end
 
   def oidc_auto_provision_enabled?
@@ -171,7 +174,8 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
 
   def stash_oidc_role_keys
     auth = request.env['omniauth.auth']
-    return unless auth.present? && auth['provider'] == 'openid_connect'
+    # Match the Symbol-or-String provider value (see oidc_provider?).
+    return unless auth.present? && auth['provider'].to_s == 'openid_connect'
 
     session['oidc.role_keys'] = extract_oidc_role_keys(auth['extra'])
   rescue StandardError => e

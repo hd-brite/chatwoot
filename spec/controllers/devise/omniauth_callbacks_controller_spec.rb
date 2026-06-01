@@ -192,13 +192,18 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
     # set (see config/initializers/omniauth.rb), so it is absent from the
     # OmniAuth middleware in the test env. We therefore drive the flow through
     # the always-registered google_oauth2 transport while crafting the auth
-    # hash with provider 'openid_connect' and the `groups` claim - the
+    # hash with provider :openid_connect and the `groups` claim - the
     # controller branches on auth_hash['provider'], so the exercised code path
     # is identical to a real OIDC callback.
-    def set_oidc_omniauth(email:, groups: [], name: 'OIDC User')
+    #
+    # The provider defaults to the Symbol :openid_connect because that is what
+    # OmniAuth actually emits at runtime (the strategy is registered with
+    # `name: :openid_connect`). Mocking it as a String previously hid a bug
+    # where the controller compared the Symbol value against a String literal.
+    def set_oidc_omniauth(email:, groups: [], name: 'OIDC User', provider: :openid_connect)
       OmniAuth.config.test_mode = true
       OmniAuth.config.mock_auth[:google_oauth2] = OmniAuth::AuthHash.new(
-        provider: 'openid_connect',
+        provider: provider,
         uid: "oidc-#{email}",
         info: { name: name, email: email, email_verified: true },
         credentials: { token: 'access-token' },
@@ -278,6 +283,24 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         expect(user).to be_present
         expect(user.type).not_to eq('SuperAdmin')
         expect(account.account_users.find_by(user_id: user.id).role).to eq('agent')
+      end
+    end
+
+    # Regression for BO-1795: OmniAuth emits the provider as the Symbol
+    # :openid_connect, but the controller compared it against the String
+    # 'openid_connect'. The Symbol != String mismatch silently skipped the
+    # super-admin mapping for every real login. Lock both shapes.
+    [:openid_connect, 'openid_connect'].each do |provider_value|
+      it "promotes an argocd user when provider is #{provider_value.class}(#{provider_value.inspect})" do
+        with_modified_env FRONTEND_URL: 'http://www.example.com' do
+          user = create(:user, email: 'oidc-provider-shape@example.com')
+          set_oidc_omniauth(email: 'oidc-provider-shape@example.com', groups: %w[argocd-admins], provider: provider_value)
+
+          get '/omniauth/google_oauth2/callback'
+          follow_redirect!
+
+          expect(user.reload.type).to eq('SuperAdmin')
+        end
       end
     end
   end
