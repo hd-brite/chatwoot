@@ -303,5 +303,46 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         end
       end
     end
+
+    # BO-1796: ArgoCD and Chatwoot live in different Zitadel projects, so a
+    # Chatwoot login never carries argocd-* grants. A dedicated `chatwoot-admin`
+    # role is granted on the brite_chatwoot project instead, and must also map
+    # to SuperAdmin (alongside the default argocd-* prefix).
+    it 'promotes an existing user to super admin when they hold the chatwoot-admin role' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        user = create(:user, email: 'chatwoot-admin@example.com')
+        set_oidc_omniauth(email: 'chatwoot-admin@example.com', groups: %w[chatwoot-admin])
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        expect(user.reload.type).to eq('SuperAdmin')
+      end
+    end
+
+    it 'respects the OIDC_ADMIN_ROLE_KEYS override and ignores default prefixes' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com', OIDC_ADMIN_ROLE_KEYS: 'chatwoot-admin' do
+        argocd_user = create(:user, email: 'argocd-only@example.com')
+        set_oidc_omniauth(email: 'argocd-only@example.com', groups: %w[argocd-admins])
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        # argocd- is no longer an admin prefix once the env var is overridden.
+        expect(argocd_user.reload.type).not_to eq('SuperAdmin')
+      end
+    end
+
+    it 'promotes via a custom OIDC_ADMIN_ROLE_KEYS prefix' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com', OIDC_ADMIN_ROLE_KEYS: 'chatwoot-admin' do
+        user = create(:user, email: 'custom-admin@example.com')
+        set_oidc_omniauth(email: 'custom-admin@example.com', groups: %w[chatwoot-admin])
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        expect(user.reload.type).to eq('SuperAdmin')
+      end
+    end
   end
 end

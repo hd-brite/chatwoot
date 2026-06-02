@@ -161,7 +161,19 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   end
 
   def oidc_user_is_admin?
-    oidc_user_role_keys.any? { |key| key.start_with?('argocd-') }
+    prefixes = oidc_admin_role_prefixes
+    oidc_user_role_keys.any? { |key| prefixes.any? { |prefix| key.start_with?(prefix) } }
+  end
+
+  # Role-key prefixes that promote an OIDC user to SuperAdmin, configurable via
+  # the comma-separated OIDC_ADMIN_ROLE_KEYS env var. The default keeps the
+  # original `argocd-*` behavior (any ArgoCD grant = admin) and adds the
+  # dedicated `chatwoot-admin` role granted on the brite_chatwoot Zitadel
+  # project (ArgoCD and Chatwoot live in different projects, so ArgoCD grants
+  # are not visible to a Chatwoot login - see BO-1796).
+  def oidc_admin_role_prefixes
+    ENV.fetch('OIDC_ADMIN_ROLE_KEYS', 'argocd-,chatwoot-admin')
+       .split(',').map(&:strip).reject(&:empty?)
   end
 
   # Roles are stashed by redirect_callbacks (before `extra` is stripped) and
