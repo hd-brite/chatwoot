@@ -4,6 +4,8 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   def omniauth_success
     get_resource_from_auth_hash
 
+    return redirect_to login_page_url(error: 'no-dealer-access') if oidc_provider? && oidc_login_blocked?
+
     if @resource.present?
       sync_super_admin_from_oidc if oidc_provider?
       sign_in_user
@@ -22,6 +24,7 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   # super-admin mapping has something to work with.
   def redirect_callbacks
     stash_oidc_role_keys
+    stash_oidc_dealer_user_id
     super
   end
 
@@ -129,15 +132,26 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   end
 
   def auto_provision_oidc_user
-    account = Account.first
+    is_admin = oidc_user_is_admin?
+    account = resolve_oidc_account(is_admin)
     return redirect_to login_page_url(error: 'no-account-found') if account.nil?
 
-    is_admin = oidc_user_is_admin?
     @resource = build_oidc_user(is_admin)
     AccountUser.create!(account_id: account.id, user_id: @resource.id, role: is_admin ? :administrator : :agent)
 
     encoded_email = ERB::Util.url_encode(@resource.email)
     redirect_to login_page_url(email: encoded_email, sso_auth_token: @resource.generate_sso_auth_token)
+  end
+
+  # BO-1696: With the Brite dealer integration enabled, a provisioned OIDC user
+  # is assigned to the Account named after their top-level dealer (resolved from
+  # the dealers API by the dealer_user_id in their Zitadel metadata). With the
+  # integration disabled (no API base URL), everyone lands on the first account-
+  # the upstream behaviour- so local/non-Brite setups are unaffected.
+  def resolve_oidc_account(is_admin)
+    return Account.first unless brite_dealer_integration_enabled?
+
+    Brite::Dealers::AccountAssignmentService.new(dealer_user_id: oidc_dealer_user_id, is_admin: is_admin).perform
   end
 
   def build_oidc_user(is_admin)
@@ -162,6 +176,22 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
 
   def oidc_user_is_admin?
     oidc_user_role_keys.any? { |key| key.start_with?('argocd-') }
+  end
+
+  # BO-1696: When the Brite dealer integration is enabled, an OIDC user must
+  # either be a super admin (argocd-*) or carry a dealer_user_id in their
+  # Zitadel metadata. Everyone else is blocked from logging in. The integration
+  # is off (and this gate is a no-op) unless the dealers API base URL is set, so
+  # local/non-Brite setups are unaffected.
+  def oidc_login_blocked?
+    return false unless brite_dealer_integration_enabled?
+    return false if oidc_user_is_admin?
+
+    oidc_dealer_user_id.blank?
+  end
+
+  def brite_dealer_integration_enabled?
+    ENV['BRITE_DEALERS_API_BASE_URL'].present?
   end
 
   # Roles are stashed by redirect_callbacks (before `extra` is stripped) and
@@ -195,6 +225,35 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     keys.concat(project_roles.keys.map(&:to_s)) if project_roles.is_a?(Hash)
 
     keys.uniq
+  end
+
+  # Stashed by redirect_callbacks (before `extra` is stripped) and read back in
+  # omniauth_success after the redirect bounce, mirroring the role-key handling.
+  def oidc_dealer_user_id
+    session['oidc.dealer_user_id'].presence
+  end
+
+  def stash_oidc_dealer_user_id
+    auth = request.env['omniauth.auth']
+    return unless auth.present? && auth['provider'].to_s == 'openid_connect'
+
+    session['oidc.dealer_user_id'] = extract_oidc_dealer_user_id(auth['extra'])
+  rescue StandardError => e
+    Rails.logger.error("[oidc] failed to stash dealer_user_id: #{e.class}: #{e.message}")
+  end
+
+  # Zitadel surfaces user metadata under the urn:zitadel:iam:user:metadata claim
+  # as a Hash of base64-encoded values (the dealer_user_id is stored as metadata
+  # by the dealers service). Decode it back to the raw UUID string.
+  def extract_oidc_dealer_user_id(extra)
+    raw = (extra && extra['raw_info']) || {}
+    metadata = raw['urn:zitadel:iam:user:metadata']
+    return nil unless metadata.is_a?(Hash)
+
+    encoded = metadata['dealer_user_id']
+    return nil if encoded.blank?
+
+    Base64.decode64(encoded.to_s).strip.presence
   end
 
   def default_devise_mapping

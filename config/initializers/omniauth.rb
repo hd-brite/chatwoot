@@ -22,6 +22,11 @@ Rails.application.config.middleware.use OmniAuth::Builder do
     # OmniauthCallbacksController#extract_oidc_role_keys reads. Driven by env so
     # non-Brite/local setups are unaffected.
     oidc_scope = %i[openid email profile]
+    # BO-1696: request the user's Zitadel metadata so the dealer_user_id claim
+    # (urn:zitadel:iam:user:metadata) is present in the token. The callback
+    # controller reads it to resolve the user's top-level dealer for account
+    # assignment and to gate non-super-admin logins.
+    oidc_scope << 'urn:zitadel:iam:user:metadata'
     tpt_project_id = ENV['OIDC_TPT_PROJECT_ID'].presence
     oidc_scope << "urn:zitadel:iam:org:project:id:#{tpt_project_id}:aud" if tpt_project_id
 

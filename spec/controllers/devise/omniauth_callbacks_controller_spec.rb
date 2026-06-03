@@ -206,14 +206,18 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
     # claim arrives empty; the audience scope added in omniauth.rb instead
     # surfaces those roles under this project-roles claim. extract_oidc_role_keys
     # reads both shapes, so super-admin mapping must work from either one.
-    def set_oidc_omniauth(email:, groups: [], project_roles: nil, name: 'OIDC User', provider: :openid_connect)
+    # `dealer_user_id` mimics Zitadel's urn:zitadel:iam:user:metadata claim, a
+    # Hash of base64-encoded metadata values. The controller decodes it back to
+    # the raw UUID to resolve the user's top-level dealer and gate logins.
+    def set_oidc_omniauth(email:, groups: [], project_roles: nil, dealer_user_id: nil, provider: :openid_connect)
       OmniAuth.config.test_mode = true
       raw_info = { 'groups' => groups }
       raw_info['urn:zitadel:iam:org:project:roles'] = project_roles unless project_roles.nil?
+      raw_info['urn:zitadel:iam:user:metadata'] = { 'dealer_user_id' => Base64.strict_encode64(dealer_user_id) } unless dealer_user_id.nil?
       OmniAuth.config.mock_auth[:google_oauth2] = OmniAuth::AuthHash.new(
         provider: provider,
         uid: "oidc-#{email}",
-        info: { name: name, email: email, email_verified: true },
+        info: { name: 'OIDC User', email: email, email_verified: true },
         credentials: { token: 'access-token' },
         extra: { raw_info: raw_info }
       )
@@ -328,6 +332,79 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         expect(user).to be_present
         expect(user.type).not_to eq('SuperAdmin')
         expect(account.account_users.find_by(user_id: user.id).role).to eq('agent')
+      end
+    end
+
+    # BO-1696: Brite dealer integration. Enabled only when
+    # BRITE_DEALERS_API_BASE_URL is set; non-super-admins must carry a
+    # dealer_user_id, and provisioned users are assigned to the account named
+    # after their top-level dealer (resolved via the dealers API).
+    describe 'dealer integration (BRITE_DEALERS_API_BASE_URL set)' do
+      let(:dealer_env) do
+        { FRONTEND_URL: 'http://www.example.com', BRITE_DEALERS_API_BASE_URL: 'https://dev.api.hdbrite.com' }
+      end
+
+      def stub_dealer_resolution(result)
+        resolver = instance_double(Brite::Dealers::DealerResolutionService, perform: result)
+        allow(Brite::Dealers::DealerResolutionService).to receive(:new).and_return(resolver)
+      end
+
+      it 'blocks a non-admin OIDC login that has no dealer_user_id' do
+        with_modified_env(**dealer_env) do
+          create(:user, email: 'no-dealer@example.com')
+          set_oidc_omniauth(email: 'no-dealer@example.com', groups: [])
+
+          get '/omniauth/google_oauth2/callback'
+          follow_redirect!
+
+          expect(response.location).to include('no-dealer-access')
+        end
+      end
+
+      it 'allows a super admin to log in without a dealer_user_id' do
+        with_modified_env(**dealer_env) do
+          user = create(:user, email: 'admin-no-dealer@example.com')
+          set_oidc_omniauth(email: 'admin-no-dealer@example.com', groups: %w[argocd-admins])
+
+          get '/omniauth/google_oauth2/callback'
+          follow_redirect!
+
+          expect(response.location).not_to include('no-dealer-access')
+          expect(response.location).to include('sso_auth_token')
+          expect(user.reload.type).to eq('SuperAdmin')
+        end
+      end
+
+      it 'assigns a provisioned dealer user to their top-level dealer account' do
+        with_modified_env(**dealer_env, OIDC_AUTO_PROVISION: 'true') do
+          stub_dealer_resolution(
+            Brite::Dealers::DealerResolutionService::Result.new(
+              top_level_dealer_id: 'top-dealer-1', top_level_dealer_name: 'Acme Window Co'
+            )
+          )
+          set_oidc_omniauth(email: 'dealer-user@example.com', groups: [], dealer_user_id: 'du-123')
+
+          get '/omniauth/google_oauth2/callback'
+          follow_redirect!
+
+          account = Account.find_by(name: 'Acme Window Co')
+          expect(account).to be_present
+          user = User.from_email('dealer-user@example.com')
+          expect(account.account_users.find_by(user_id: user.id).role).to eq('agent')
+        end
+      end
+
+      it 'blocks a provisioned non-admin whose dealer lookup yields no dealer' do
+        with_modified_env(**dealer_env, OIDC_AUTO_PROVISION: 'true') do
+          stub_dealer_resolution(nil)
+          set_oidc_omniauth(email: 'unresolved-dealer@example.com', groups: [], dealer_user_id: 'du-404')
+
+          get '/omniauth/google_oauth2/callback'
+          follow_redirect!
+
+          expect(response.location).to include('no-account-found')
+          expect(User.from_email('unresolved-dealer@example.com')).to be_nil
+        end
       end
     end
 
