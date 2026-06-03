@@ -25,6 +25,7 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   def redirect_callbacks
     stash_oidc_role_keys
     stash_oidc_dealer_user_id
+    stash_oidc_origin
     super
   end
 
@@ -37,6 +38,11 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     needs_password_reset = oauth_user_needs_password_reset?
     @resource.skip_confirmation! if confirmable_enabled?
     set_random_password_if_oauth_user if needs_password_reset
+
+    # Verified OIDC super admins also get a :super_admin session so the console
+    # works without a second login; pure admins (no dealer) land there directly.
+    bridge_super_admin_session_from_oidc
+    return redirect_to super_admin_root_path if oidc_redirect_to_super_admin?
 
     # once the resource is found and verified
     # we can just send them to the login page again with the SSO params
@@ -139,6 +145,9 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     @resource = build_oidc_user(is_admin)
     AccountUser.create!(account_id: account.id, user_id: @resource.id, role: is_admin ? :administrator : :agent)
 
+    bridge_super_admin_session_from_oidc
+    return redirect_to super_admin_root_path if oidc_redirect_to_super_admin?
+
     encoded_email = ERB::Util.url_encode(@resource.email)
     redirect_to login_page_url(email: encoded_email, sso_auth_token: @resource.generate_sso_auth_token)
   end
@@ -176,6 +185,29 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
 
   def oidc_user_is_admin?
     oidc_user_role_keys.any? { |key| key.start_with?('argocd-') }
+  end
+
+  # Bridge a verified OIDC super admin into the separate :super_admin Devise
+  # scope (the cookie session the /super_admin console authenticates against) so
+  # it works without a second password login. Gated on argocd-* admin - the same
+  # check that governs SuperAdmin promotion.
+  def bridge_super_admin_session_from_oidc
+    return unless oidc_provider? && oidc_user_is_admin? && @resource&.persisted?
+
+    sign_in(:super_admin, SuperAdmin.find(@resource.id))
+  end
+
+  # Send admins straight to /super_admin when they have no dealer/agent context
+  # (no dealer_user_id) or when they explicitly initiated SSO from the console
+  # sign-in page (origin stashed in redirect_callbacks).
+  def oidc_redirect_to_super_admin?
+    return false unless oidc_provider? && oidc_user_is_admin?
+
+    oidc_initiated_from_super_admin? || oidc_dealer_user_id.blank?
+  end
+
+  def oidc_initiated_from_super_admin?
+    session['oidc.origin'].to_s.start_with?('/super_admin')
   end
 
   # BO-1696: When the Brite dealer integration is enabled, an OIDC user must
@@ -239,6 +271,18 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     return nil if encoded.blank?
 
     Base64.decode64(encoded.to_s).strip.presence
+  end
+
+  # Stashed by redirect_callbacks (before the devise_token_auth bounce) so the
+  # success handler can tell whether SSO was initiated from the /super_admin
+  # sign-in page (its button sends ?origin=/super_admin) and route there.
+  def stash_oidc_origin
+    auth = request.env['omniauth.auth']
+    return unless auth.present? && auth['provider'].to_s == 'openid_connect'
+
+    session['oidc.origin'] = request.env['omniauth.origin'].presence
+  rescue StandardError => e
+    Rails.logger.error("[oidc] failed to stash origin: #{e.class}: #{e.message}")
   end
 
   def default_devise_mapping

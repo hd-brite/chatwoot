@@ -436,7 +436,9 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         end
       end
 
-      it 'allows a super admin to log in without a dealer_user_id' do
+      # BO-1696: a super admin with no dealer/agent context (no dealer_user_id)
+      # is sent straight into the /super_admin console instead of the agent app.
+      it 'sends a super admin without a dealer_user_id to the super admin console' do
         with_modified_env(**dealer_env) do
           user = create(:user, email: 'admin-no-dealer@example.com')
           set_oidc_omniauth(email: 'admin-no-dealer@example.com', groups: %w[argocd-admins])
@@ -445,7 +447,24 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
           follow_redirect!
 
           expect(response.location).not_to include('no-dealer-access')
+          expect(response.location).to end_with('/super_admin')
+          expect(user.reload.type).to eq('SuperAdmin')
+        end
+      end
+
+      # BO-1696: a super admin who is ALSO a dealer (has dealer_user_id) lands in
+      # the agent app as usual; the :super_admin session is still established so
+      # the in-app console link works without a second login.
+      it 'sends a super admin with a dealer_user_id to the agent app' do
+        with_modified_env(**dealer_env) do
+          user = create(:user, email: 'admin-dealer@example.com')
+          set_oidc_omniauth(email: 'admin-dealer@example.com', groups: %w[argocd-admins], dealer_user_id: 'du-999')
+
+          get '/omniauth/google_oauth2/callback'
+          follow_redirect!
+
           expect(response.location).to include('sso_auth_token')
+          expect(response.location).not_to end_with('/super_admin')
           expect(user.reload.type).to eq('SuperAdmin')
         end
       end
