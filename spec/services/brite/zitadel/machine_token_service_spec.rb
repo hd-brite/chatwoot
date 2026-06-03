@@ -1,6 +1,10 @@
 require 'rails_helper'
 
 RSpec.describe Brite::Zitadel::MachineTokenService do
+  subject(:service) do
+    described_class.new(issuer_url: issuer, project_id: project_id, machine_key_json: machine_key_json)
+  end
+
   let(:issuer) { 'https://auth.test.example.com' }
   let(:project_id) { '319057286905463843' }
   let(:rsa_key) { OpenSSL::PKey::RSA.new(2048) }
@@ -13,9 +17,14 @@ RSpec.describe Brite::Zitadel::MachineTokenService do
     }.to_json
   end
   let(:token_url) { "#{issuer}/oauth/v2/token" }
-
-  subject(:service) do
-    described_class.new(issuer_url: issuer, project_id: project_id, machine_key_json: machine_key_json)
+  let(:token_response) { { access_token: 'access-token-abc', expires_in: 3600 }.to_json }
+  let(:expected_scope) do
+    [
+      'openid', 'profile', 'roles',
+      'urn:zitadel:iam:org:projects:roles',
+      'urn:zitadel:iam:org:project:id:zitadel:aud',
+      "urn:zitadel:iam:org:project:id:#{project_id}:aud"
+    ].join(' ')
   end
 
   before { Rails.cache.clear }
@@ -25,7 +34,7 @@ RSpec.describe Brite::Zitadel::MachineTokenService do
       before do
         stub_request(:post, token_url).to_return(
           status: 200,
-          body: { access_token: 'access-token-abc', expires_in: 3600 }.to_json,
+          body: token_response,
           headers: { 'Content-Type' => 'application/json' }
         )
       end
@@ -37,28 +46,26 @@ RSpec.describe Brite::Zitadel::MachineTokenService do
       it 'uses the JWT-bearer grant with the reserved Brite project audience scope' do
         service.token
 
-        expect(WebMock).to have_requested(:post, token_url).with { |req|
-          body = Rack::Utils.parse_nested_query(req.body)
-          body['grant_type'] == 'urn:ietf:params:oauth:grant-type:jwt-bearer' &&
-            body['scope'].include?("urn:zitadel:iam:org:project:id:#{project_id}:aud") &&
-            body['scope'].include?('roles')
-        }
+        expect(WebMock).to have_requested(:post, token_url).with(
+          body: hash_including(
+            'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'scope' => expected_scope
+          )
+        )
       end
 
       it 'signs the assertion with the machine key and the expected claims' do
+        captured_body = nil
+        stub_request(:post, token_url).with { |req| captured_body = req.body }.to_return(
+          status: 200, body: token_response, headers: { 'Content-Type' => 'application/json' }
+        )
+
         service.token
 
-        assertion = nil
-        expect(WebMock).to(have_requested(:post, token_url).with { |req|
-          assertion = Rack::Utils.parse_nested_query(req.body)['assertion']
-          assertion.present?
-        })
-
+        assertion = Rack::Utils.parse_nested_query(captured_body)['assertion']
         payload, header = JWT.decode(assertion, rsa_key.public_key, true, { algorithm: 'RS256' })
         expect(header['kid']).to eq('kid-123')
-        expect(payload['iss']).to eq('machine-user-1')
-        expect(payload['sub']).to eq('machine-user-1')
-        expect(payload['aud']).to eq(issuer)
+        expect(payload).to include('iss' => 'machine-user-1', 'sub' => 'machine-user-1', 'aud' => issuer)
       end
 
       it 'caches the token and does not refetch on subsequent calls' do

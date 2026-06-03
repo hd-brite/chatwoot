@@ -145,48 +145,13 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
 
   # BO-1696: With the Brite dealer integration enabled, a provisioned OIDC user
   # is assigned to the Account named after their top-level dealer (resolved from
-  # the dealers API by the dealer_user_id in their Zitadel metadata). Super
-  # admins without a dealer fall back to the first account. With the integration
-  # disabled (no API base URL), everyone lands on the first account- the
-  # upstream behaviour- so local/non-Brite setups are unaffected.
+  # the dealers API by the dealer_user_id in their Zitadel metadata). With the
+  # integration disabled (no API base URL), everyone lands on the first account-
+  # the upstream behaviour- so local/non-Brite setups are unaffected.
   def resolve_oidc_account(is_admin)
     return Account.first unless brite_dealer_integration_enabled?
 
-    dealer_user_id = oidc_dealer_user_id
-    return Account.first if dealer_user_id.blank? && is_admin
-
-    dealer = resolve_top_level_dealer(dealer_user_id)
-    return find_or_create_dealer_account(dealer) if dealer&.top_level_dealer_name.present?
-
-    # A non-admin reaching here passed the login gate (so had a dealer_user_id)
-    # but the lookup failed or returned no top-level dealer. Do not silently
-    # drop them into an arbitrary account; admins still fall back.
-    is_admin ? Account.first : nil
-  end
-
-  def resolve_top_level_dealer(dealer_user_id)
-    return nil if dealer_user_id.blank?
-
-    Brite::Dealers::DealerResolutionService.new(dealer_user_id).perform
-  rescue StandardError => e
-    Rails.logger.error("[oidc] dealer resolution failed for dealer_user_id=#{dealer_user_id}: #{e.class}: #{e.message}")
-    nil
-  end
-
-  def find_or_create_dealer_account(dealer)
-    name = dealer.top_level_dealer_name.to_s.strip
-    return nil if name.blank?
-
-    Account.transaction do
-      Account.lock.find_by(name: name) || Account.create!(
-        name: name,
-        locale: I18n.locale,
-        custom_attributes: {
-          'onboarding_step' => 'account_details',
-          'brite_top_level_dealer_id' => dealer.top_level_dealer_id
-        }
-      )
-    end
+    Brite::Dealers::AccountAssignmentService.new(dealer_user_id: oidc_dealer_user_id, is_admin: is_admin).perform
   end
 
   def build_oidc_user(is_admin)

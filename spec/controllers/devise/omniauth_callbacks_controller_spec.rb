@@ -209,7 +209,7 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
     # `dealer_user_id` mimics Zitadel's urn:zitadel:iam:user:metadata claim, a
     # Hash of base64-encoded metadata values. The controller decodes it back to
     # the raw UUID to resolve the user's top-level dealer and gate logins.
-    def set_oidc_omniauth(email:, groups: [], project_roles: nil, dealer_user_id: nil, name: 'OIDC User', provider: :openid_connect)
+    def set_oidc_omniauth(email:, groups: [], project_roles: nil, dealer_user_id: nil, provider: :openid_connect)
       OmniAuth.config.test_mode = true
       raw_info = { 'groups' => groups }
       raw_info['urn:zitadel:iam:org:project:roles'] = project_roles unless project_roles.nil?
@@ -217,7 +217,7 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
       OmniAuth.config.mock_auth[:google_oauth2] = OmniAuth::AuthHash.new(
         provider: provider,
         uid: "oidc-#{email}",
-        info: { name: name, email: email, email_verified: true },
+        info: { name: 'OIDC User', email: email, email_verified: true },
         credentials: { token: 'access-token' },
         extra: { raw_info: raw_info }
       )
@@ -376,7 +376,7 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
       end
 
       it 'assigns a provisioned dealer user to their top-level dealer account' do
-        with_modified_env(**dealer_env.merge(OIDC_AUTO_PROVISION: 'true')) do
+        with_modified_env(**dealer_env, OIDC_AUTO_PROVISION: 'true') do
           stub_dealer_resolution(
             Brite::Dealers::DealerResolutionService::Result.new(
               top_level_dealer_id: 'top-dealer-1', top_level_dealer_name: 'Acme Window Co'
@@ -395,7 +395,7 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
       end
 
       it 'blocks a provisioned non-admin whose dealer lookup yields no dealer' do
-        with_modified_env(**dealer_env.merge(OIDC_AUTO_PROVISION: 'true')) do
+        with_modified_env(**dealer_env, OIDC_AUTO_PROVISION: 'true') do
           stub_dealer_resolution(nil)
           set_oidc_omniauth(email: 'unresolved-dealer@example.com', groups: [], dealer_user_id: 'du-404')
 

@@ -1,14 +1,14 @@
 require 'rails_helper'
 
 RSpec.describe Brite::Dealers::DealerResolutionService do
+  subject(:service) do
+    described_class.new(dealer_user_id, base_url: base_url, token_service: token_service)
+  end
+
   let(:base_url) { 'https://dev.api.hdbrite.com' }
   let(:dealer_user_id) { '11111111-2222-3333-4444-555555555555' }
   let(:request_url) { "#{base_url}/v1/dealers-service/dealer-users/#{dealer_user_id}" }
   let(:token_service) { instance_double(Brite::Zitadel::MachineTokenService, token: 'bearer-token-xyz') }
-
-  subject(:service) do
-    described_class.new(dealer_user_id, base_url: base_url, token_service: token_service)
-  end
 
   describe '#perform' do
     context 'when the dealer user is found' do
