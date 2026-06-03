@@ -13,14 +13,17 @@ Rails.application.config.middleware.use OmniAuth::Builder do
   }
 
   if ENV['OIDC_ISSUER_URL'].present?
-    # The brite-chatwoot Zitadel app lives in its own project, so the user's
+    # The brite-chatwoot Zitadel app lives in its own project, so a user's
     # argocd-* grants (on the separate "Brite Third Party Tools" project) are
-    # NOT in the default token audience and the super-admin mapping never sees
-    # them. Adding that project to the audience via Zitadel's reserved
-    # `urn:zitadel:iam:org:project:id:{id}:aud` scope makes Zitadel assert its
-    # roles under the `urn:zitadel:iam:org:project:roles` claim, which
-    # OmniauthCallbacksController#extract_oidc_role_keys reads. Driven by env so
-    # non-Brite/local setups are unaffected.
+    # NOT asserted in the default token and the super-admin mapping never sees
+    # them. Per Zitadel's cross-project role model surfacing them requires BOTH
+    # scopes below: the reserved `urn:zitadel:iam:org:project:id:{id}:aud` scope
+    # adds that project to the token audience, and `urn:zitadel:iam:org:projects:roles`
+    # requests the roles for every audience project. Zitadel then asserts the
+    # grant under the project-id-specific claim `urn:zitadel:iam:org:project:{id}:roles`,
+    # which OmniauthCallbacksController#extract_oidc_role_keys reads. The audience
+    # scope alone is NOT sufficient. Driven by env so non-Brite/local setups are
+    # unaffected.
     oidc_scope = %i[openid email profile]
     # BO-1696: request the user's Zitadel metadata so the dealer_user_id claim
     # (urn:zitadel:iam:user:metadata) is present in the token. The callback
@@ -28,7 +31,10 @@ Rails.application.config.middleware.use OmniAuth::Builder do
     # assignment and to gate non-super-admin logins.
     oidc_scope << 'urn:zitadel:iam:user:metadata'
     tpt_project_id = ENV['OIDC_TPT_PROJECT_ID'].presence
-    oidc_scope << "urn:zitadel:iam:org:project:id:#{tpt_project_id}:aud" if tpt_project_id
+    if tpt_project_id
+      oidc_scope << "urn:zitadel:iam:org:project:id:#{tpt_project_id}:aud"
+      oidc_scope << 'urn:zitadel:iam:org:projects:roles'
+    end
 
     provider :openid_connect,
              name: :openid_connect,

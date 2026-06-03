@@ -214,17 +214,42 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
 
   # Brite's Zitadel emits a user's granted roles as a flat `groups` claim (see
   # the AddGroupsClaim action in the zitadel terraform) - the same claim ArgoCD
-  # consumes. Standard Zitadel setups instead expose them under the project
-  # roles claim (a hash). Read both so super-admin mapping is robust regardless
-  # of how the issued token is shaped.
+  # consumes. Zitadel also asserts them under project roles claims: the generic
+  # `urn:zitadel:iam:org:project:roles` for the app's own project, and the
+  # project-id-specific `urn:zitadel:iam:org:project:{id}:roles` for audience
+  # projects requested via the roles scope (this is how the cross-project
+  # argocd-* grant on "Brite Third Party Tools" arrives). Each value is a Hash
+  # of role_key => { org_id => primary_domain }, so the Hash keys are the role
+  # names. Read every shape so super-admin mapping is robust.
   def extract_oidc_role_keys(extra)
     raw = (extra && extra['raw_info']) || {}
 
+    log_oidc_raw_claims(raw) if ENV['OIDC_LOG_ROLES'] == 'true'
+
     keys = Array(raw['groups']).map(&:to_s)
-    project_roles = raw['urn:zitadel:iam:org:project:roles']
-    keys.concat(project_roles.keys.map(&:to_s)) if project_roles.is_a?(Hash)
+    raw.each do |claim, value|
+      next unless project_roles_claim?(claim) && value.is_a?(Hash)
+
+      keys.concat(value.keys.map(&:to_s))
+    end
 
     keys.uniq
+  end
+
+  # Matches both the generic `urn:zitadel:iam:org:project:roles` claim and the
+  # project-id-specific `urn:zitadel:iam:org:project:{id}:roles` claim.
+  def project_roles_claim?(claim)
+    key = claim.to_s
+    key.start_with?('urn:zitadel:iam:org:project:') && key.end_with?(':roles')
+  end
+
+  # Dev-only debug (gated by OIDC_LOG_ROLES): log the claim keys present in the
+  # token so we can confirm whether the cross-project role assertion landed.
+  # Only keys are logged- never claim values- to avoid leaking PII.
+  def log_oidc_raw_claims(raw)
+    role_claim_keys = raw.keys.map(&:to_s).select { |k| project_roles_claim?(k) }
+    Rails.logger.info("[oidc] raw_info claim keys: #{raw.keys.map(&:to_s).sort.inspect}")
+    Rails.logger.info("[oidc] role claim keys present: #{role_claim_keys.inspect}")
   end
 
   # Stashed by redirect_callbacks (before `extra` is stripped) and read back in

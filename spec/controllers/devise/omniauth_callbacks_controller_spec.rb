@@ -209,11 +209,12 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
     # `dealer_user_id` mimics Zitadel's urn:zitadel:iam:user:metadata claim, a
     # Hash of base64-encoded metadata values. The controller decodes it back to
     # the raw UUID to resolve the user's top-level dealer and gate logins.
-    def set_oidc_omniauth(email:, groups: [], project_roles: nil, dealer_user_id: nil, provider: :openid_connect)
+    def set_oidc_omniauth(email:, groups: [], project_roles: nil, dealer_user_id: nil, provider: :openid_connect, extra_raw_claims: {})
       OmniAuth.config.test_mode = true
       raw_info = { 'groups' => groups }
       raw_info['urn:zitadel:iam:org:project:roles'] = project_roles unless project_roles.nil?
       raw_info['urn:zitadel:iam:user:metadata'] = { 'dealer_user_id' => Base64.strict_encode64(dealer_user_id) } unless dealer_user_id.nil?
+      raw_info.merge!(extra_raw_claims.stringify_keys) if extra_raw_claims.present?
       OmniAuth.config.mock_auth[:google_oauth2] = OmniAuth::AuthHash.new(
         provider: provider,
         uid: "oidc-#{email}",
@@ -290,6 +291,76 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
         follow_redirect!
 
         expect(user.reload.type).not_to eq('SuperAdmin')
+      end
+    end
+
+    # BO-1696: cross-project roles requested via the urn:zitadel:iam:org:projects:roles
+    # scope arrive under the project-id-specific claim
+    # urn:zitadel:iam:org:project:{id}:roles (not the generic claim). This is the
+    # real shape the argocd-admins grant on the separate Third Party Tools project
+    # takes in the brite-chatwoot token. Lock that the parser reads it.
+    it 'promotes an existing user to super admin from the project-id-specific roles claim' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        user = create(:user, email: 'oidc-projid-admin@example.com')
+        set_oidc_omniauth(
+          email: 'oidc-projid-admin@example.com',
+          groups: [],
+          extra_raw_claims: {
+            'urn:zitadel:iam:org:project:348444441574376526:roles' => {
+              'argocd-admins' => { '12345' => 'brite-devops.example.com' }
+            }
+          }
+        )
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        expect(user.reload.type).to eq('SuperAdmin')
+      end
+    end
+
+    it 'keeps a user with only non-argocd project-id-specific roles as a normal user' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        user = create(:user, email: 'oidc-projid-user@example.com')
+        set_oidc_omniauth(
+          email: 'oidc-projid-user@example.com',
+          groups: [],
+          extra_raw_claims: {
+            'urn:zitadel:iam:org:project:348444441574376526:roles' => {
+              'lms-admin' => { '12345' => 'brite-devops.example.com' }
+            }
+          }
+        )
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        expect(user.reload.type).not_to eq('SuperAdmin')
+      end
+    end
+
+    # BO-1696: OIDC_LOG_ROLES is a dev-only debug switch that logs the token's
+    # claim keys (never values) so cross-project role assertion can be verified.
+    # Exercise that path to confirm it logs and does not disturb role mapping.
+    it 'logs raw claim keys without affecting role mapping when OIDC_LOG_ROLES is set' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com', OIDC_LOG_ROLES: 'true' do
+        user = create(:user, email: 'oidc-log-roles@example.com')
+        allow(Rails.logger).to receive(:info).and_call_original
+        set_oidc_omniauth(
+          email: 'oidc-log-roles@example.com',
+          groups: [],
+          extra_raw_claims: {
+            'urn:zitadel:iam:org:project:348444441574376526:roles' => {
+              'argocd-admins' => { '12345' => 'brite-devops.example.com' }
+            }
+          }
+        )
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        expect(Rails.logger).to have_received(:info).with(/raw_info claim keys/)
+        expect(user.reload.type).to eq('SuperAdmin')
       end
     end
 
