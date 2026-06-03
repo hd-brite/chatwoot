@@ -207,24 +207,9 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     # Match the Symbol-or-String provider value (see oidc_provider?).
     return unless auth.present? && auth['provider'].to_s == 'openid_connect'
 
-    session['oidc.role_keys'] = extract_oidc_role_keys(auth['extra'])
+    session['oidc.role_keys'] = Brite::Oidc::RoleClaimExtractor.new(auth['extra']).role_keys
   rescue StandardError => e
     Rails.logger.error("[oidc] failed to stash role keys: #{e.class}: #{e.message}")
-  end
-
-  # Brite's Zitadel emits a user's granted roles as a flat `groups` claim (see
-  # the AddGroupsClaim action in the zitadel terraform) - the same claim ArgoCD
-  # consumes. Standard Zitadel setups instead expose them under the project
-  # roles claim (a hash). Read both so super-admin mapping is robust regardless
-  # of how the issued token is shaped.
-  def extract_oidc_role_keys(extra)
-    raw = (extra && extra['raw_info']) || {}
-
-    keys = Array(raw['groups']).map(&:to_s)
-    project_roles = raw['urn:zitadel:iam:org:project:roles']
-    keys.concat(project_roles.keys.map(&:to_s)) if project_roles.is_a?(Hash)
-
-    keys.uniq
   end
 
   # Stashed by redirect_callbacks (before `extra` is stripped) and read back in
