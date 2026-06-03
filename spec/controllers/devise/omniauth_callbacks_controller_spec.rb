@@ -200,14 +200,22 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
     # OmniAuth actually emits at runtime (the strategy is registered with
     # `name: :openid_connect`). Mocking it as a String previously hid a bug
     # where the controller compared the Symbol value against a String literal.
-    def set_oidc_omniauth(email:, groups: [], name: 'OIDC User', provider: :openid_connect)
+    # `project_roles` mimics Zitadel's `urn:zitadel:iam:org:project:roles` claim,
+    # a Hash keyed by role name. Chatwoot's brite-chatwoot app lives in a
+    # different Zitadel project than the argocd-* roles, so the flat `groups`
+    # claim arrives empty; the audience scope added in omniauth.rb instead
+    # surfaces those roles under this project-roles claim. extract_oidc_role_keys
+    # reads both shapes, so super-admin mapping must work from either one.
+    def set_oidc_omniauth(email:, groups: [], project_roles: nil, name: 'OIDC User', provider: :openid_connect)
       OmniAuth.config.test_mode = true
+      raw_info = { 'groups' => groups }
+      raw_info['urn:zitadel:iam:org:project:roles'] = project_roles unless project_roles.nil?
       OmniAuth.config.mock_auth[:google_oauth2] = OmniAuth::AuthHash.new(
         provider: provider,
         uid: "oidc-#{email}",
         info: { name: name, email: email, email_verified: true },
         credentials: { token: 'access-token' },
-        extra: { raw_info: { 'groups' => groups } }
+        extra: { raw_info: raw_info }
       )
     end
 
@@ -236,6 +244,43 @@ RSpec.describe 'DeviseOverrides::OmniauthCallbacksController', type: :request do
       with_modified_env FRONTEND_URL: 'http://www.example.com' do
         user = create(:user, email: 'oidc-user@example.com')
         set_oidc_omniauth(email: 'oidc-user@example.com', groups: %w[lms-admin])
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        expect(user.reload.type).not_to eq('SuperAdmin')
+      end
+    end
+
+    # BO-1696: the brite-chatwoot app is in its own Zitadel project, so the
+    # flat `groups` claim is empty; argocd-* roles arrive via the
+    # urn:zitadel:iam:org:project:roles claim once the Third Party Tools project
+    # is added to the token audience. Lock that the super-admin mapping works
+    # from the project-roles claim shape (Hash keyed by role name).
+    it 'promotes an existing user to super admin from the project-roles claim' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        user = create(:user, email: 'oidc-proj-admin@example.com')
+        set_oidc_omniauth(
+          email: 'oidc-proj-admin@example.com',
+          groups: [],
+          project_roles: { 'argocd-admins' => { '12345' => 'brite-devops.example.com' } }
+        )
+
+        get '/omniauth/google_oauth2/callback'
+        follow_redirect!
+
+        expect(user.reload.type).to eq('SuperAdmin')
+      end
+    end
+
+    it 'keeps a user with only non-argocd project roles as a normal user' do
+      with_modified_env FRONTEND_URL: 'http://www.example.com' do
+        user = create(:user, email: 'oidc-proj-user@example.com')
+        set_oidc_omniauth(
+          email: 'oidc-proj-user@example.com',
+          groups: [],
+          project_roles: { 'lms-admin' => { '12345' => 'brite-devops.example.com' } }
+        )
 
         get '/omniauth/google_oauth2/callback'
         follow_redirect!
