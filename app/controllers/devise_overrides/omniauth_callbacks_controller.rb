@@ -1,5 +1,6 @@
 class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCallbacksController
   include EmailHelper
+  include OidcSuperAdminBridge
 
   def omniauth_success
     get_resource_from_auth_hash
@@ -25,6 +26,7 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   def redirect_callbacks
     stash_oidc_role_keys
     stash_oidc_dealer_user_id
+    stash_oidc_origin
     super
   end
 
@@ -37,6 +39,11 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     needs_password_reset = oauth_user_needs_password_reset?
     @resource.skip_confirmation! if confirmable_enabled?
     set_random_password_if_oauth_user if needs_password_reset
+
+    # Verified OIDC super admins also get a :super_admin session so the console
+    # works without a second login; pure admins (no dealer) land there directly.
+    bridge_super_admin_session_from_oidc
+    return redirect_to super_admin_root_path if oidc_redirect_to_super_admin?
 
     # once the resource is found and verified
     # we can just send them to the login page again with the SSO params
@@ -138,6 +145,9 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
 
     @resource = build_oidc_user(is_admin)
     AccountUser.create!(account_id: account.id, user_id: @resource.id, role: is_admin ? :administrator : :agent)
+
+    bridge_super_admin_session_from_oidc
+    return redirect_to super_admin_root_path if oidc_redirect_to_super_admin?
 
     encoded_email = ERB::Util.url_encode(@resource.email)
     redirect_to login_page_url(email: encoded_email, sso_auth_token: @resource.generate_sso_auth_token)
