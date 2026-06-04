@@ -314,12 +314,19 @@ export default {
             </a>
           </div>
           <SimpleDivider
-            v-if="showEmailLogin && (showGoogleOAuth || showSamlLogin || showOidcLogin)"
+            v-if="
+              showEmailLogin &&
+              (showGoogleOAuth || showSamlLogin || showOidcLogin)
+            "
             :label="$t('COMMON.OR')"
             class="uppercase"
           />
         </div>
-        <form v-if="showEmailLogin" class="space-y-5" @submit.prevent="submitFormLogin">
+        <form
+          v-if="showEmailLogin"
+          class="space-y-5"
+          @submit.prevent="submitFormLogin"
+        >
           <FormInput
             v-model="credentials.email"
             name="email_address"
