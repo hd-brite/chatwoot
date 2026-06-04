@@ -103,6 +103,9 @@ export default {
     showOidcLogin() {
       return this.allowedLoginMethods.includes('oidc');
     },
+    showEmailLogin() {
+      return this.allowedLoginMethods.includes('email');
+    },
     oidcDisplayName() {
       return window.chatwootConfig.oidcDisplayName || 'SSO Login';
     },
@@ -311,12 +314,19 @@ export default {
             </a>
           </div>
           <SimpleDivider
-            v-if="showGoogleOAuth || showSamlLogin || showOidcLogin"
+            v-if="
+              showEmailLogin &&
+              (showGoogleOAuth || showSamlLogin || showOidcLogin)
+            "
             :label="$t('COMMON.OR')"
             class="uppercase"
           />
         </div>
-        <form class="space-y-5" @submit.prevent="submitFormLogin">
+        <form
+          v-if="showEmailLogin"
+          class="space-y-5"
+          @submit.prevent="submitFormLogin"
+        >
           <FormInput
             v-model="credentials.email"
             name="email_address"
