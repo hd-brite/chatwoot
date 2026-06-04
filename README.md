@@ -5,6 +5,8 @@ ___
 
 # Chatwoot
 
+> **Brite fork.** This is Brite's fork of Chatwoot (deployed via the `hd-brite/brite` monorepo). For the Brite customizations (Zitadel OIDC SSO), local development, OIDC testing, and the image build/release process, see **[BRITE.md](./BRITE.md)**. The Brite branch is `master`.
+
 The modern customer support platform, an open-source alternative to Intercom, Zendesk, Salesforce Service Cloud etc.
 
 <p>

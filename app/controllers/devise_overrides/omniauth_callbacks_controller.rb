@@ -1,10 +1,33 @@
 class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCallbacksController
   include EmailHelper
+  include OidcSuperAdminBridge
 
   def omniauth_success
     get_resource_from_auth_hash
 
-    @resource.present? ? sign_in_user : sign_up_user
+    return redirect_to login_page_url(error: 'no-dealer-access') if oidc_provider? && oidc_login_blocked?
+
+    if @resource.present?
+      sync_super_admin_from_oidc if oidc_provider?
+      sign_in_user
+    elsif oidc_provider? && oidc_auto_provision_enabled?
+      auto_provision_oidc_user
+    else
+      sign_up_user
+    end
+  end
+
+  # /omniauth/:provider/callback. devise_token_auth's redirect_callbacks stashes
+  # the auth hash into the session WITHOUT the `extra` section (it strips it to
+  # avoid CookieOverflow) and 307-redirects to /auth/:provider/callback. Since
+  # the OIDC role/group claims live in `extra.raw_info`, they never reach
+  # omniauth_success. Capture them here, while `extra` is still present, so the
+  # super-admin mapping has something to work with.
+  def redirect_callbacks
+    stash_oidc_role_keys
+    stash_oidc_dealer_user_id
+    stash_oidc_origin
+    super
   end
 
   private
@@ -16,6 +39,11 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
     needs_password_reset = oauth_user_needs_password_reset?
     @resource.skip_confirmation! if confirmable_enabled?
     set_random_password_if_oauth_user if needs_password_reset
+
+    # Verified OIDC super admins also get a :super_admin session so the console
+    # works without a second login; pure admins (no dealer) land there directly.
+    bridge_super_admin_session_from_oidc
+    return redirect_to super_admin_root_path if oidc_redirect_to_super_admin?
 
     # once the resource is found and verified
     # we can just send them to the login page again with the SSO params
@@ -97,6 +125,130 @@ class DeviseOverrides::OmniauthCallbacksController < DeviseTokenAuth::OmniauthCa
   def set_random_password_if_oauth_user
     # Password must satisfy secure_password requirements (uppercase, lowercase, number, special char)
     @resource.update(password: "#{SecureRandom.hex(16)}aA1!") if @resource.persisted?
+  end
+
+  def oidc_provider?
+    # OmniAuth registers the strategy with `name: :openid_connect`, so the auth
+    # hash carries the provider as the Symbol `:openid_connect`. Hashie::Mash
+    # stringifies keys but leaves symbol values intact, so compare via `to_s`.
+    auth_hash['provider'].to_s == 'openid_connect'
+  end
+
+  def oidc_auto_provision_enabled?
+    ENV['OIDC_AUTO_PROVISION'] == 'true'
+  end
+
+  def auto_provision_oidc_user
+    is_admin = oidc_user_is_admin?
+    account = resolve_oidc_account(is_admin)
+    return redirect_to login_page_url(error: 'no-account-found') if account.nil?
+
+    @resource = build_oidc_user(is_admin)
+    AccountUser.create!(account_id: account.id, user_id: @resource.id, role: is_admin ? :administrator : :agent)
+
+    bridge_super_admin_session_from_oidc
+    return redirect_to super_admin_root_path if oidc_redirect_to_super_admin?
+
+    encoded_email = ERB::Util.url_encode(@resource.email)
+    redirect_to login_page_url(email: encoded_email, sso_auth_token: @resource.generate_sso_auth_token)
+  end
+
+  # BO-1696: With the Brite dealer integration enabled, a provisioned OIDC user
+  # is assigned to the Account named after their top-level dealer (resolved from
+  # the dealers API by the dealer_user_id in their Zitadel metadata). With the
+  # integration disabled (no API base URL), everyone lands on the first account-
+  # the upstream behaviour- so local/non-Brite setups are unaffected.
+  def resolve_oidc_account(is_admin)
+    return Account.first unless brite_dealer_integration_enabled?
+
+    Brite::Dealers::AccountAssignmentService.new(dealer_user_id: oidc_dealer_user_id, is_admin: is_admin).perform
+  end
+
+  def build_oidc_user(is_admin)
+    user = User.new(
+      email: auth_hash['info']['email'],
+      name: auth_hash['info']['name'] || auth_hash['info']['email'].split('@').first,
+      password: "#{SecureRandom.hex(16)}aA1!"
+    )
+    user.confirm
+    user.type = 'SuperAdmin' if is_admin
+    user.save!
+    user
+  end
+
+  def sync_super_admin_from_oidc
+    should_be_admin = oidc_user_is_admin?
+    is_admin = @resource.type == 'SuperAdmin'
+    return if should_be_admin == is_admin
+
+    @resource.update!(type: should_be_admin ? 'SuperAdmin' : 'User')
+  end
+
+  def oidc_user_is_admin?
+    oidc_user_role_keys.any? { |key| key.start_with?('argocd-') }
+  end
+
+  # BO-1696: When the Brite dealer integration is enabled, an OIDC user must
+  # either be a super admin (argocd-*) or carry a dealer_user_id in their
+  # Zitadel metadata. Everyone else is blocked from logging in. The integration
+  # is off (and this gate is a no-op) unless the dealers API base URL is set, so
+  # local/non-Brite setups are unaffected.
+  def oidc_login_blocked?
+    return false unless brite_dealer_integration_enabled?
+    return false if oidc_user_is_admin?
+
+    oidc_dealer_user_id.blank?
+  end
+
+  def brite_dealer_integration_enabled?
+    ENV['BRITE_DEALERS_API_BASE_URL'].present?
+  end
+
+  # Roles are stashed by redirect_callbacks (before `extra` is stripped) and
+  # read back here in omniauth_success after the redirect bounce.
+  def oidc_user_role_keys
+    keys = Array(session['oidc.role_keys']).map(&:to_s)
+    Rails.logger.info("[oidc] resolved role keys: #{keys.inspect}") if ENV['OIDC_LOG_ROLES'] == 'true'
+    keys
+  end
+
+  def stash_oidc_role_keys
+    auth = request.env['omniauth.auth']
+    # Match the Symbol-or-String provider value (see oidc_provider?).
+    return unless auth.present? && auth['provider'].to_s == 'openid_connect'
+
+    session['oidc.role_keys'] = Brite::Oidc::RoleClaimExtractor.new(auth['extra']).role_keys
+  rescue StandardError => e
+    Rails.logger.error("[oidc] failed to stash role keys: #{e.class}: #{e.message}")
+  end
+
+  # Stashed by redirect_callbacks (before `extra` is stripped) and read back in
+  # omniauth_success after the redirect bounce, mirroring the role-key handling.
+  def oidc_dealer_user_id
+    session['oidc.dealer_user_id'].presence
+  end
+
+  def stash_oidc_dealer_user_id
+    auth = request.env['omniauth.auth']
+    return unless auth.present? && auth['provider'].to_s == 'openid_connect'
+
+    session['oidc.dealer_user_id'] = extract_oidc_dealer_user_id(auth['extra'])
+  rescue StandardError => e
+    Rails.logger.error("[oidc] failed to stash dealer_user_id: #{e.class}: #{e.message}")
+  end
+
+  # Zitadel surfaces user metadata under the urn:zitadel:iam:user:metadata claim
+  # as a Hash of base64-encoded values (the dealer_user_id is stored as metadata
+  # by the dealers service). Decode it back to the raw UUID string.
+  def extract_oidc_dealer_user_id(extra)
+    raw = (extra && extra['raw_info']) || {}
+    metadata = raw['urn:zitadel:iam:user:metadata']
+    return nil unless metadata.is_a?(Hash)
+
+    encoded = metadata['dealer_user_id']
+    return nil if encoded.blank?
+
+    Base64.decode64(encoded.to_s).strip.presence
   end
 
   def default_devise_mapping
